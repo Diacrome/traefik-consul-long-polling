@@ -1,0 +1,23 @@
+api:
+  dashboard: true
+  insecure: true
+
+log:
+  level: DEBUG  # Включаем детальное логирование
+
+accessLog:
+  filePath: "/dev/stdout"
+
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  consulCatalog:
+    endpoint:
+      address: "http://consul:8500"
+    exposedByDefault: false
+    watch: true  # Long polling
+    refreshInterval: 30s  # Fallback (не должен использоваться)
+    connectAware: false
+    connectByDefault: false

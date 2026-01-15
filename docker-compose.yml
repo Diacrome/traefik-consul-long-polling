@@ -1,0 +1,53 @@
+services:
+  consul:
+    image: hashicorp/consul:latest
+    container_name: consul
+    ports:
+      - "8500:8500"
+    volumes:
+      - ./consul-config:/consul/config
+    command: agent -server -ui -bootstrap-expect=1 -client=0.0.0.0 -config-dir=/consul/config
+    networks:
+      - demo
+
+  traefik:
+    image: traefik:v2.10
+    container_name: traefik
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - ./traefik.yml:/etc/traefik/traefik.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - consul
+    networks:
+      - demo
+
+  app:
+    build: ./app
+    container_name: app
+    environment:
+      - SERVICE_NAME=api
+      - PORT=8000
+    networks:
+      - demo
+    depends_on:
+      - consul
+
+  monitor:
+    build: ./monitor
+    container_name: monitor
+    environment:
+      - CONSUL_URL=http://consul:8500
+      - TRAEFIK_URL=http://traefik:8080
+      - SERVICE_NAME=api
+    networks:
+      - demo
+    depends_on:
+      - consul
+      - traefik
+
+networks:
+  demo:
+    driver: bridge

@@ -1,0 +1,24 @@
+{
+  "service": {
+    "id": "api-instance",
+    "name": "api",
+    "address": "app",
+    "port": 8000,
+    "tags": [
+      "traefik.enable=true",
+      "traefik.http.routers.api.rule=PathPrefix(`/api`)",
+      "traefik.http.services.api.loadbalancer.server.port=8000",
+      "traefik.http.middlewares.api-stripprefix.stripprefix.prefixes=/api",
+      "traefik.http.routers.api.middlewares=api-stripprefix"
+    ],
+    "check": {
+      "id": "api-health",
+      "name": "API Health Check",
+      "http": "http://app:8000/health",
+      "method": "GET",
+      "interval": "2s",
+      "timeout": "1s",
+      "deregister_critical_service_after": "10s"
+    }
+  }
+}
