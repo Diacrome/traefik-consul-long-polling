@@ -13,15 +13,34 @@ sleep 30
 LINES_BEFORE_MONITOR=$(docker-compose logs monitor | wc -l)
 LINES_BEFORE_TRAEFIK=$(docker-compose logs traefik | wc -l)
 
-echo ""
-echo "✅ Service:"
-curl -s http://localhost/api | jq -c
+echo "Waiting for Traefik to be ready..."
+until [ $(curl -s -o /dev/null -w "%{http_code}" http://localhost/api) -eq 200 ]; do
+  echo -n "."
+  sleep 1
+done
+echo "app READY!"
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 KILL_TIME=$(date -u +"%H:%M:%S")
 echo "💀 KILL APP at $KILL_TIME"
-docker kill -s SIGKILL app
+curl -s http://localhost/api/fail > /dev/null
+
+echo "⏳ Service is still running, but health is failing..."
+
+# Цикл ожидания, пока Traefik не отдаст 404 (значит, Consul обновил статус)
+MAX_WAIT=20
+for i in $(seq 1 $MAX_WAIT); do
+    STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api)
+    if [ "$STATUS" == "404" ]; then
+        NOTIFIED_TIME=$(date +%s)
+        DIFF=$((NOTIFIED_TIME - FAIL_TIME))
+        echo "✅ [$(date -u +"%H:%M:%S")] Traefik updated! (Took ${DIFF}s)"
+        break
+    fi
+    echo -n "."
+    sleep 1
+done
 
 echo ""
 echo "⏳ Wait 5s..."
