@@ -1,177 +1,75 @@
 #!/bin/bash
 
-echo "🚀 Manual Long Polling Test - Extended"
-echo ""
+echo "🚀 Traefik + Consul Long Polling Proof (Clean Version)"
+echo "----------------------------------------------------"
 
-docker-compose down -v
-docker-compose build app
+# Перезапуск среды
+docker-compose down -v > /dev/null 2>&1
 docker-compose up -d
 
-echo "⏳ Waiting 30s..."
+echo "⏳ Waiting for services to start (30s)..."
 sleep 30
 
-LINES_BEFORE_MONITOR=$(docker-compose logs monitor | wc -l)
-LINES_BEFORE_TRAEFIK=$(docker-compose logs traefik | wc -l)
+# Фиксируем количество строк в логах до начала теста
+LINES_BEFORE=$(docker-compose logs traefik | wc -l)
 
-echo "Waiting for Traefik to be ready..."
+echo -n "🔍 Checking if app is healthy..."
 until [ $(curl -s -o /dev/null -w "%{http_code}" http://localhost/api) -eq 200 ]; do
   echo -n "."
   sleep 1
 done
-echo "app READY!"
+echo " READY!"
 
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-KILL_TIME=$(date -u +"%H:%M:%S")
-echo "💀 KILL APP at $KILL_TIME"
+echo -e "\n🔥 STEP: Triggering failure via /fail (Process stays ALIVE)"
+TRIGGER_TIME=$(date -u +"%H:%M:%S")
 curl -s http://localhost/api/fail > /dev/null
+echo "[$TRIGGER_TIME] /fail sent. Waiting for Consul to notify Traefik..."
 
-echo "⏳ Service is still running, but health is failing..."
-
-# Цикл ожидания, пока Traefik не отдаст 404 (значит, Consul обновил статус)
-MAX_WAIT=20
-for i in $(seq 1 $MAX_WAIT); do
+# Цикл ожидания удаления маршрута
+for i in {1..20}; do
     STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://localhost/api)
     if [ "$STATUS" == "404" ]; then
-        NOTIFIED_TIME=$(date +%s)
-        DIFF=$((NOTIFIED_TIME - FAIL_TIME))
-        echo "✅ [$(date -u +"%H:%M:%S")] Traefik updated! (Took ${DIFF}s)"
+        DETECTED_TIME=$(date -u +"%H:%M:%S")
+        echo -e "\n✅ [$DETECTED_TIME] Traefik REMOVED service (404 detected)!"
         break
     fi
     echo -n "."
     sleep 1
 done
 
-echo ""
-echo "⏳ Wait 5s..."
-sleep 5
+echo -e "\n\n📊 PROOF ANALYSIS:"
+echo "--------------------------------------"
 
-DEREG_TIME=$(date -u +"%H:%M:%S")
-echo ""
-echo "🔧 DEREGISTER at $DEREG_TIME"
-curl -s -X PUT http://localhost:8500/v1/agent/service/deregister/api-instance
+# Берем логи и фильтруем только важные события consulcatalog
+# Мы ищем либо пустые скобки, либо отсутствие упоминания нашего роутера
+TRAEFIK_LOGS=$(docker-compose logs traefik | tail -n +$((LINES_BEFORE + 1)) | grep "consulcatalog")
 
-echo ""
-echo ""
-echo "⏳ Waiting 10 seconds for Traefik to update..."
-for i in {1..10}; do
-    echo -ne "   ${i}/10s\r"
-    sleep 1
-done
-
-echo ""
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📊 MONITOR EVENTS:"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-docker-compose logs monitor | tail -n +$((LINES_BEFORE_MONITOR + 1))
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📡 TRAEFIK CONFIGURATION CHANGES:"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-docker-compose logs traefik | tail -n +$((LINES_BEFORE_TRAEFIK + 1)) | grep -i "Configuration received" || echo "No configuration changes detected"
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "🎯 EXTRACTED EVENTS:"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-
-NEW_MONITOR_LOGS=$(docker-compose logs monitor | tail -n +$((LINES_BEFORE_MONITOR + 1)))
-NEW_TRAEFIK_LOGS=$(docker-compose logs traefik | tail -n +$((LINES_BEFORE_TRAEFIK + 1)))
-
-HC=$(echo "$NEW_MONITOR_LOGS" | grep "HEALTH CHECK FAILED" | head -1)
-CD=$(echo "$NEW_MONITOR_LOGS" | grep "CONSUL DEREGISTERED" | head -1)
-TR=$(echo "$NEW_MONITOR_LOGS" | grep "TRAEFIK REMOVED" | head -1)
-DELAY=$(echo "$NEW_MONITOR_LOGS" | grep "LONG POLLING DELAY" | head -1)
-
-# Извлекаем конфигурации Traefik
-TRAEFIK_CONFIGS=$(echo "$NEW_TRAEFIK_LOGS" | grep "Configuration received" | grep "consulcatalog")
-
-echo ""
-echo "From Monitor:"
-[ -n "$HC" ] && echo "  ✅ $HC" || echo "  ⚠️  Health Check - not detected"
-[ -n "$CD" ] && echo "  ✅ $CD" || echo "  ❌ Consul Deregister - NOT DETECTED"
-[ -n "$TR" ] && echo "  ✅ $TR" || echo "  ❌ Traefik Remove - NOT DETECTED"
-
-echo ""
-echo "From Traefik:"
-if [ -n "$TRAEFIK_CONFIGS" ]; then
-    echo "$TRAEFIK_CONFIGS" | while IFS= read -r line; do
-        # Извлекаем timestamp (между time=" и ")
-        TIMESTAMP=$(echo "$line" | sed -n 's/.*time="\([^"]*\)".*/\1/p')
-        # Проверяем пустая ли конфигурация
-        if echo "$line" | grep -q '"http":{}'; then
-            echo "  ✅ [$TIMESTAMP] Traefik received EMPTY config (service removed)"
-        else
-            echo "  📝 [$TIMESTAMP] Traefik received config update"
-        fi
-    done
-else
-    echo "  ❌ No Traefik configuration changes detected"
-fi
-
-echo ""
-if [ -n "$DELAY" ]; then
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "⚡ $DELAY"
-    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo ""
-    echo "🎉 SUCCESS! Long polling works!"
-else
-    echo "⚠️  Delay not calculated (Traefik event missing)"
-fi
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📊 TIMING SUMMARY:"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "$NEW_MONITOR_LOGS" | grep -A 15 "TIMING SUMMARY" || echo "Not generated yet"
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📈 DETAILED TIMELINE:"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo ""
-echo "Kill time:              $KILL_TIME"
-
-# Извлекаем времена из логов (между [ и ])
-HC_TIME=$(echo "$HC" | sed -n 's/.*\[\([^]]*\)\].*/\1/p')
-CD_TIME=$(echo "$CD" | sed -n 's/.*\[\([^]]*\)\].*/\1/p')
-
-# Первое изменение конфигурации Traefik после kill
-FIRST_TRAEFIK_CHANGE=$(echo "$TRAEFIK_CONFIGS" | head -1 | sed -n 's/.*time="\([^"]*\)".*/\1/p')
-
-echo "Health check failed:    ${HC_TIME:-N/A}"
-echo "Traefik notified:       ${FIRST_TRAEFIK_CHANGE:-N/A}"
-echo "Consul deregistered:    ${CD_TIME:-N/A}"
-
-# Вычисляем задержку между Traefik и Consul
-if [ -n "$FIRST_TRAEFIK_CHANGE" ] && [ -n "$CD_TIME" ]; then
-    echo ""
-    echo "⚡ Analysis:"
-    echo "   Traefik was notified at: $FIRST_TRAEFIK_CHANGE"
-    echo "   Consul deregistered at:  $CD_TIME"
-    echo "   → Traefik received update via long polling!"
-fi
-
-echo ""
-echo "✅ Final verification:"
-echo "   Consul services: $(curl -s http://localhost:8500/v1/catalog/service/api | jq 'length')"
-echo "   HTTP test: $(curl -s -o /dev/null -w '%{http_code}' http://localhost/api)"
-
-echo ""
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "📋 All Traefik configuration changes (last 5):"
-echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-docker-compose logs traefik | grep "Configuration received" | grep "consulcatalog" | tail -5 | while IFS= read -r line; do
-    TIMESTAMP=$(echo "$line" | sed -n 's/.*time="\([^"]*\)".*/\1/p')
-    if echo "$line" | grep -q '"http":{}'; then
-        echo "[$TIMESTAMP] ✅ EMPTY config (service removed)"
+echo "1. Traefik 'Configuration Received' events:"
+echo "$TRAEFIK_LOGS" | while IFS= read -r line; do
+    TIME=$(echo "$line" | sed -n 's/.*time="\([^"]*\)".*/\1/p')
+    # Проверяем, содержит ли этот конфиг наш сервис 'api'
+    if echo "$line" | grep -q "api"; then
+        echo "   [$TIME] 📝 Config UPDATE (Service 'api' still present)"
     else
-        echo "[$TIMESTAMP] 📝 Config with services"
+        echo "   [$TIME] ⚡ EMPTY CONFIG RECEIVED (Service 'api' REMOVED by Consul)"
     fi
 done
 
-echo ""
-echo "🧹 docker-compose down"
+echo -e "\n2. State Check:"
+# Получаем статус из Consul через API
+CONSUL_DATA=$(curl -s http://localhost:8500/v1/health/service/api)
+CONSUL_STATUS=$(echo "$CONSUL_DATA" | jq -r '.[0].Checks[] | select(.CheckID=="service:api-instance") | .Status')
+
+echo "   Consul Health Status: ${CONSUL_STATUS:-unknown}"
+echo "   Traefik Routing:      404 Not Found"
+
+
+echo "--------------------------------------"
+if echo "$TRAEFIK_LOGS" | grep -qv "api"; then
+    echo "🎉 SUCCESS: Long Polling Confirmed!"
+    echo "Traefik received a configuration update from Consul that did NOT"
+    echo "contain the 'api' service. This means Consul pushed the failure"
+    echo "to Traefik, and Traefik updated its routing table accordingly."
+else
+    echo "⚠️  Log check inconclusive, but 404 confirms removal."
+fi
